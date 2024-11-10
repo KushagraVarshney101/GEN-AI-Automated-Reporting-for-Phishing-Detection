@@ -1,5 +1,5 @@
 # GEN-AI-Automated-Reporting-for-Phishing-Detection
-This project uses generative AI to assess websites as phishing or legitimate. It generates PDF reports by getting a screenshot of web using API and Provides report with with green flags and red flags, offering insights into site trustworthiness, impact assessment, and more. Perfect for quick, automated analysis of URL security.
+This project uses generative AI to assess websites as phishing or legitimate. It generates PDF reports by getting a screenshot of web using API and Provides report with green flags and red flags, offering insights into site trustworthiness, impact assessment, and more. Perfect for quick, automated analysis of URL security.
 
 ## Deployment
 
