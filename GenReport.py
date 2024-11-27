@@ -11,6 +11,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageTemplate, Frame
 from reportlab.lib.units import inch
+from transformers import BlipProcessor, BlipForConditionalGeneration  # For image captioning
 from reportlab.platypus.flowables import PageBreak
 
 warnings.filterwarnings("ignore")
@@ -21,6 +22,10 @@ load_dotenv()
 
 GENAI.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = GENAI.GenerativeModel("gemini-1.5-flash")
+
+# Load the BLIP model for image captioning
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+caption_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
 def extract_base_domain(url):
     pattern = r'^https?:\/\/(?:www\.)?([^\/\?\:]+)'
@@ -43,62 +48,18 @@ def capture_screenshot(api_key, url, output_file):
     except requests.RequestException as e:
         raise RuntimeError(f"Failed to capture screenshot: {e}")
 
-def interpret_image(image_path):
+def generate_image_caption(image_path):
     try:
-        image = PILImage.open(image_path)  # Use PILImage to avoid conflict
-
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        response = model.generate_content(image)
-        details = []
-        if hasattr(response, '_done') and response._done:
-            if hasattr(response, '_result') and response._result:
-                result = response._result
-                if hasattr(result, 'candidates') and result.candidates:
-                    candidate = result.candidates[0]
-                    if hasattr(candidate.content, 'parts') and candidate.content.parts:
-                        for part in candidate.content.parts:
-                            text = part.text
-                            details.append(f"Content Part: {text}")
-                    else:
-                        details.append("No content parts found.")
-                else:
-                    details.append("No candidates found in the result.")
-            else:
-                details.append("Result is not available.")
-        else:
-            details.append("Response is not done or incomplete.")
+        # Open the image using PIL
+        image = PILImage.open(image_path).convert("RGB")
         
-        if hasattr(response, '_metadata'):
-            metadata = response._metadata
-            details.append("Metadata:")
-            for key, value in metadata.items():
-                details.append(f"  {key}: {value}")
-        else:
-            details.append("No metadata available.")
-
-        return "\n".join(details)
+        # Process the image and generate the caption
+        inputs = processor(images=image, return_tensors="pt")
+        out = caption_model.generate(**inputs)
+        caption = processor.decode(out[0], skip_special_tokens=True)
+        return caption
     except Exception as e:
-        raise RuntimeError(f"Error interpreting image: {e}")
-
-def detect_encoding(file_path):
-    try:
-        with open(file_path, 'rb') as file:
-            raw_data = file.read()
-        result = chardet.detect(raw_data)
-        return result['encoding']
-    except Exception as e:
-        raise RuntimeError(f"Error detecting encoding: {e}")
-
-def read_file(file_path):
-    try:
-        encoding = detect_encoding(file_path)
-        with open(file_path, 'r', encoding=encoding) as file:
-            return file.read()
-    except FileNotFoundError as e:
-        raise FileNotFoundError(f"File not found: {e}")
-    except Exception as e:
-        raise RuntimeError(f"Unexpected error reading file: {e}")
+        raise RuntimeError(f"Error generating image caption: {e}")
 
 def generate_response(prompt):
     try:
@@ -123,41 +84,6 @@ def clean_response(response):
         if cleaned_line:
             cleaned_lines.append(cleaned_line)
     return '\n'.join(cleaned_lines)
-
-def format_response(response, result):
-    if result == "Phishing":
-        replacements = {
-            "Analysis:": "\nAnalysis:\n",
-            "Content:": "\nContent:\n",
-            "Phishing Characteristics:": "\nPhishing Characteristics:\n",
-            "Possible Red Flags:": "\nPossible Red Flags:\n",
-            "Recommendations:": "\nRecommendations:\n",
-            "Conclusion:": "\nConclusion:\n",
-        }
-    elif result == "Legitimate":
-        replacements = {
-            "Analysis:": "\nAnalysis:\n",
-            "Content:": "\nContent:\n",
-            "Legitimate Characteristics:": "\nLegitimate Characteristics:\n",
-            "Possible Green Flags:": "\nPossible Green Flags:\n",
-            "Recommendations:": "\nRecommendations:\n",
-            "Impacts:": "\nImpacts:\n",
-        }
-    else:
-        raise ValueError("Invalid result argument. Must be 'Phishing' or 'Legitimate'.")
-
-    for key, value in replacements.items():
-        response = response.replace(key, value)
-
-    return response
-
-def save_result_to_txt(result, file_path):
-    try:
-        with open(file_path, 'w', encoding='utf-8') as file:
-            file.write(result)
-    except Exception as e:
-        raise RuntimeError(f"Error saving text file: {e}")
-
 def add_footer(canvas, doc):
     footer_text = "Confidential: Authorized recipients only; unauthorized use or distribution is prohibited."
     canvas.saveState()
@@ -172,6 +98,37 @@ def add_footer(canvas, doc):
     text_x = margin + (page_width - text_width) / 2  # Center the text
     canvas.drawString(text_x, footer_y, footer_text)
     canvas.restoreState()
+
+def format_response(response, result):
+    if result == "Phishing":
+        replacements = {
+            "Content:": "\nContent:\n",
+            "Phishing Characteristics:": "\nPhishing Characteristics:\n",
+            "Possible Red Flags:": "\nPossible Red Flags:\n",
+            "Recommendations:": "\nRecommendations:\n",
+            "Conclusion:": "\nConclusion:\n",
+        }
+    elif result == "Legitimate":
+        replacements = {
+            "Content:": "\nContent:\n",
+            "Legitimate Characteristics:": "\nLegitimate Characteristics:\n",
+            "Possible Green Flags:": "\nPossible Green Flags:\n",
+            "Recommendations:": "\nRecommendations:\n",
+            "Impacts:": "\nImpacts:\n",
+        }
+    else:
+        raise ValueError("Invalid result argument. Must be 'Phishing' or 'Legitimate'.")
+
+    for key, value in replacements.items():
+        response = response.replace(key, value)
+
+    return response
+def save_result_to_txt(result, file_path):
+    try:
+        with open(file_path, 'w', encoding='utf-8') as file:
+            file.write(result)
+    except Exception as e:
+        raise RuntimeError(f"Error saving text file: {e}")
 
 def save_result_to_pdf(result, file_path, image_path):
     doc = SimpleDocTemplate(file_path, pagesize=letter)
@@ -213,7 +170,7 @@ def save_result_to_pdf(result, file_path, image_path):
         doc.build(story, onFirstPage=add_footer, onLaterPages=add_footer)
         print(file_path)
     except Exception as e:
-        raise RuntimeError(f"Error saving PDF file: {e}")
+        raise RuntimeError(f"Error saving PDF file: {e}")
 
 def main(url, result):
     if not url.startswith(("http://", "https://")):
@@ -234,20 +191,21 @@ def main(url, result):
     
     try:
         capture_screenshot(api_key, url, screenshot_file_path)
-        result_from_image = interpret_image(screenshot_file_path)
-        save_result_to_txt(result_from_image, text_file_path)
+        caption = generate_image_caption(screenshot_file_path)  # Get image caption
+        result_from_image = caption  # Use the caption as the text for analysis
         
+        save_result_to_txt(result_from_image, text_file_path)
+
         prompt = (
             f"{'Phishing Analysis Report' if result == 'Phishing' else 'Legitimate Analysis Report'}\n\n"
             f"Analyze the following content for {'phishing' if result == 'Phishing' else 'legitimate'} characteristics and provide a detailed analysis.\n\n"
-            f"Provide only content, {'Phishing Characteristics, Possible Red Flags, Recommendations, Conclusion' if result == 'Phishing' else 'Legitimate Characteristics, Possible Green Flags, Impacts'}.\n\n"
-            f"{'Content should not exceed one line. Phishing Characteristics with 4 points only. Possible Red Flags with 3 points only. Recommendations with 3 points only. Conclusion' if result == 'Phishing' else 'Content should not exceed one line. Legitimate Characteristics with 4 points only. Possible Green Flags with 3 points only. Impacts with 3 points only'}.\n\n"
+            f"Provide only content, {'Analysis, Phishing Characteristics, Possible Red Flags, Recommendations, Conclusion' if result == 'Phishing' else 'Legitimate Characteristics, Possible Green Flags, Impacts'}.\n\n"
+            f"{'Content should not exceed three line. Phishing Characteristics with 4 points only. Possible Red Flags with 3 points only. Recommendations with 3 points only. Conclusion' if result == 'Phishing' else 'Content should not exceed one line. Legitimate Characteristics with 4 points only. Possible Green Flags with 3 points only. Impacts with 3 points only'}.\n\n"
             f"Provide the content in a way that it can be incorporated into a PDF format easily with structure containing Analysis, Content.\n\n"
             f"Dont provide this heading Analysis: in response provide {'Phishing Analysis Report' if result == 'Phishing' else 'Legitimate Analysis Report'}\n\n"
             f"Content:\n{result_from_image}"
         )
 
-        
         response = generate_response(prompt)
         cleaned_response = clean_response(response)
         formatted_response = format_response(cleaned_response, result)
@@ -258,11 +216,13 @@ def main(url, result):
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise ValueError("Invalid number of arguments. Expected URL and result.")
-    
+
     url_arg = sys.argv[1]
     result_arg = sys.argv[2]
 
+    # Check if the second argument is either 'Phishing' or 'Legitimate'
     if result_arg not in ["Phishing", "Legitimate"]:
         raise ValueError("Invalid result argument. Must be 'Phishing' or 'Legitimate'.")
 
     main(url_arg, result_arg)
+
